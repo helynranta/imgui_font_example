@@ -1,0 +1,11 @@
+{
+  "name": "imgui-example",
+  "version-string": "0.0.0",
+  "dependencies": [
+    {
+      "name": "sdl2",
+      "features": ["vulkan"]
+    },
+    "vulkan"
+  ]
+}
