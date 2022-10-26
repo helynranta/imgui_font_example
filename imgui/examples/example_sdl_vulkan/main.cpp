@@ -71,12 +71,27 @@ static void SetupVulkan(const char** extensions, uint32_t extensions_count)
         create_info.enabledLayerCount = 1;
         create_info.ppEnabledLayerNames = layers;
 
+#ifdef __APPLE__
+        int extra_extension_count = 2;
+#else
+        int extra_extension_count = 1;
+#endif
         // Enable debug report extension (we need additional storage, so we duplicate the user array to add our new extension to it)
-        const char** extensions_ext = (const char**)malloc(sizeof(const char*) * (extensions_count + 1));
+        const char** extensions_ext = (const char**)malloc(sizeof(const char*) * (extensions_count + extra_extension_count));
         memcpy(extensions_ext, extensions, extensions_count * sizeof(const char*));
-        extensions_ext[extensions_count] = "VK_EXT_debug_report";
-        create_info.enabledExtensionCount = extensions_count + 1;
+        extensions_ext[extensions_count] = VK_EXT_DEBUG_REPORT_EXTENSION_NAME;
+        create_info.enabledExtensionCount = extensions_count + extra_extension_count;
         create_info.ppEnabledExtensionNames = extensions_ext;
+
+#if __APPLE__
+        extensions_ext[extensions_count+1] = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+        create_info.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+
+        VkApplicationInfo app_info{};
+        app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+        app_info.apiVersion = VK_API_VERSION_1_1;
+        create_info.pApplicationInfo = &app_info;
+#endif
 
         // Create Vulkan Instance
         err = vkCreateInstance(&create_info, g_Allocator, &g_Instance);
@@ -151,8 +166,13 @@ static void SetupVulkan(const char** extensions, uint32_t extensions_count)
 
     // Create Logical Device (with 1 queue)
     {
+#ifdef __APPLE__
+        int device_extension_count = 2;
+        const char* device_extensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME,  "VK_KHR_portability_subset"};
+#else
         int device_extension_count = 1;
-        const char* device_extensions[] = { "VK_KHR_swapchain" };
+        const char* device_extensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+#endif
         const float queue_priority[] = { 1.0f };
         VkDeviceQueueCreateInfo queue_info[1] = {};
         queue_info[0].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
@@ -339,6 +359,57 @@ static void FramePresent(ImGui_ImplVulkanH_Window* wd)
     wd->SemaphoreIndex = (wd->SemaphoreIndex + 1) % wd->ImageCount; // Now we can use the next set of semaphores
 }
 
+/// This is the function I moved from main.
+/// I add own command pool and buffer for this to not mess with ones that are doing rendering to surface
+static VkCommandPool g_FontCommandPool = VK_NULL_HANDLE;
+static VkCommandBuffer g_FontCommandBuffer = VK_NULL_HANDLE;
+static void UploadFonts()
+{
+    if (g_FontCommandPool == VK_NULL_HANDLE)
+    {
+        VkCommandPoolCreateInfo createInfo{
+                .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+                .queueFamilyIndex = g_QueueFamily
+        };
+        vkCreateCommandPool(g_Device, &createInfo, nullptr, &g_FontCommandPool);
+    }
+
+    if (g_FontCommandBuffer == VK_NULL_HANDLE)
+    {
+        VkCommandBufferAllocateInfo info = {};
+        info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        info.commandPool = g_FontCommandPool;
+        info.commandBufferCount = 1;
+        auto err = vkAllocateCommandBuffers(g_Device, &info, &g_FontCommandBuffer);
+        check_vk_result(err);
+    }
+
+    auto err = vkResetCommandBuffer(g_FontCommandBuffer, 0);
+    check_vk_result(err);
+
+    VkCommandBufferBeginInfo begin_info = {};
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags |= VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    err = vkBeginCommandBuffer(g_FontCommandBuffer, &begin_info);
+    check_vk_result(err);
+
+    ImGui_ImplVulkan_CreateFontsTexture(g_FontCommandBuffer);
+
+    VkSubmitInfo end_info = {};
+    end_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    end_info.commandBufferCount = 1;
+    end_info.pCommandBuffers = &g_FontCommandBuffer;
+    err = vkEndCommandBuffer(g_FontCommandBuffer);
+    check_vk_result(err);
+    err = vkQueueSubmit(g_Queue, 1, &end_info, VK_NULL_HANDLE);
+    check_vk_result(err);
+
+    err = vkDeviceWaitIdle(g_Device);
+    check_vk_result(err);
+    ImGui_ImplVulkan_DestroyFontUploadObjects();
+}
+
 int main(int, char**)
 {
     // Setup SDL
@@ -349,7 +420,12 @@ int main(int, char**)
     }
 
     // Setup window
-    SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+    SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+
+    // I do not know if this is a bug or not but with HIGHDPI input does not work
+#ifndef __APPLE__
+    window_flags |= SDL_WINDOW_ALLOW_HIGHDPI
+#endif
     SDL_Window* window = SDL_CreateWindow("Dear ImGui SDL2+Vulkan example", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720, window_flags);
 
     // Setup Vulkan
@@ -420,35 +496,7 @@ int main(int, char**)
     //ImFont* font = io.Fonts->AddFontFromFileTTF("c:\\Windows\\Fonts\\ArialUni.ttf", 18.0f, NULL, io.Fonts->GetGlyphRangesJapanese());
     //IM_ASSERT(font != NULL);
 
-    // Upload Fonts
-    {
-        // Use any command queue
-        VkCommandPool command_pool = wd->Frames[wd->FrameIndex].CommandPool;
-        VkCommandBuffer command_buffer = wd->Frames[wd->FrameIndex].CommandBuffer;
-
-        err = vkResetCommandPool(g_Device, command_pool, 0);
-        check_vk_result(err);
-        VkCommandBufferBeginInfo begin_info = {};
-        begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        begin_info.flags |= VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        err = vkBeginCommandBuffer(command_buffer, &begin_info);
-        check_vk_result(err);
-
-        ImGui_ImplVulkan_CreateFontsTexture(command_buffer);
-
-        VkSubmitInfo end_info = {};
-        end_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        end_info.commandBufferCount = 1;
-        end_info.pCommandBuffers = &command_buffer;
-        err = vkEndCommandBuffer(command_buffer);
-        check_vk_result(err);
-        err = vkQueueSubmit(g_Queue, 1, &end_info, VK_NULL_HANDLE);
-        check_vk_result(err);
-
-        err = vkDeviceWaitIdle(g_Device);
-        check_vk_result(err);
-        ImGui_ImplVulkan_DestroyFontUploadObjects();
-    }
+    UploadFonts();
 
     // Our state
     bool show_demo_window = true;
@@ -487,6 +535,8 @@ int main(int, char**)
                 g_SwapChainRebuild = false;
             }
         }
+
+        UploadFonts();
 
         // Start the Dear ImGui frame
         ImGui_ImplVulkan_NewFrame();
@@ -553,6 +603,8 @@ int main(int, char**)
     ImGui::DestroyContext();
 
     CleanupVulkanWindow();
+
+    vkDestroyCommandPool(g_Device, g_FontCommandPool, g_Allocator);
     CleanupVulkan();
 
     SDL_DestroyWindow(window);

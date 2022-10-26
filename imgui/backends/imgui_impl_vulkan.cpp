@@ -574,11 +574,42 @@ void ImGui_ImplVulkan_RenderDrawData(ImDrawData* draw_data, VkCommandBuffer comm
     vkCmdSetScissor(command_buffer, 0, 1, &scissor);
 }
 
+void ImGui_ImplVulkan_DestroyFontsTexture()
+{
+    ImGui_ImplVulkan_Data* bd = ImGui_ImplVulkan_GetBackendData();
+    ImGui_ImplVulkan_InitInfo* v = &bd->VulkanInitInfo;
+
+    if (bd->FontView)
+    {
+        vkDestroyImageView(v->Device, bd->FontView, v->Allocator);
+        bd->FontView = VK_NULL_HANDLE;
+    }
+    if (bd->FontImage)
+    {
+        vkDestroyImage(v->Device, bd->FontImage, v->Allocator);
+        bd->FontImage = VK_NULL_HANDLE;
+    }
+    if (bd->FontMemory)
+    {
+        vkFreeMemory(v->Device, bd->FontMemory, v->Allocator);
+        bd->FontMemory = VK_NULL_HANDLE;
+    }
+
+    ImGui_ImplVulkan_RemoveTexture(bd->FontDescriptorSet);
+}
+
 bool ImGui_ImplVulkan_CreateFontsTexture(VkCommandBuffer command_buffer)
 {
     ImGuiIO& io = ImGui::GetIO();
     ImGui_ImplVulkan_Data* bd = ImGui_ImplVulkan_GetBackendData();
     ImGui_ImplVulkan_InitInfo* v = &bd->VulkanInitInfo;
+
+    // Destroy existing texture (if any)
+    if (bd->FontView || bd->FontImage || bd->FontMemory || bd->FontDescriptorSet)
+    {
+        vkQueueWaitIdle(v->Queue);
+        ImGui_ImplVulkan_DestroyFontsTexture();
+    }
 
     unsigned char* pixels;
     int width, height;
